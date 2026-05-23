@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, REST, Routes, SlashCommandBuilder } = require('discord.js');
 const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus } = require('@discordjs/voice');
 const ytdl = require('@distube/ytdl-core');
 const ytSearch = require('yt-search');
@@ -13,81 +13,105 @@ const client = new Client({
 });
 
 const queues = new Map();
-const PREFIX = '!';
 
-client.once('ready', () => {
+const commands = [
+  new SlashCommandBuilder().setName('play').setDescription('شغل أغنية').addStringOption(o => o.setName('اغنية').setDescription('اسم أو رابط الأغنية').setRequired(true)),
+  new SlashCommandBuilder().setName('skip').setDescription('تخطي الأغنية الحالية'),
+  new SlashCommandBuilder().setName('stop').setDescription('إيقاف البوت ومسح القائمة'),
+  new SlashCommandBuilder().setName('queue').setDescription('عرض قائمة الأغاني'),
+  new SlashCommandBuilder().setName('help').setDescription('عرض الأوامر'),
+].map(c => c.toJSON());
+
+client.once('ready', async () => {
   console.log(`✅ البوت شغّال: ${client.user.tag}`);
+  const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
+  try {
+    await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
+    console.log('✅ Slash Commands مسجلة!');
+  } catch (err) {
+    console.error(err);
+  }
 });
 
-client.on('messageCreate', async (message) => {
-  if (!message.content.startsWith(PREFIX) || message.author.bot) return;
-  const args = message.content.slice(PREFIX.length).trim().split(/ +/);
-  const command = args.shift().toLowerCase();
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+  const { commandName } = interaction;
 
-  if (command === 'play' || command === 'p') {
-    const query = args.join(' ');
-    if (!query) return message.reply('❌ اكتب اسم أغنية أو رابط YouTube');
-    const voiceChannel = message.member?.voice.channel;
-    if (!voiceChannel) return message.reply('❌ لازم تكون في روم صوتي!');
-    await message.channel.sendTyping();
+  if (commandName === 'play') {
+    const query = interaction.options.getString('اغنية');
+    const voiceChannel = interaction.member?.voice.channel;
+    if (!voiceChannel) return interaction.reply({ content: '❌ لازم تكون في روم صوتي!', ephemeral: true });
+
+    await interaction.deferReply();
+
     let url = query, title = query;
-    if (!ytdl.validateURL(query)) {
-      const results = await ytSearch(query);
-      if (!results.videos.length) return message.reply('❌ ما لقيت نتائج');
-      url = results.videos[0].url;
-      title = results.videos[0].title;
-    } else {
-      const info = await ytdl.getInfo(query);
-      title = info.videoDetails.title;
+    try {
+      if (!ytdl.validateURL(query)) {
+        const results = await ytSearch(query);
+        if (!results.videos.length) return interaction.editReply('❌ ما لقيت نتائج');
+        url = results.videos[0].url;
+        title = results.videos[0].title;
+      } else {
+        const info = await ytdl.getInfo(query);
+        title = info.videoDetails.title;
+      }
+    } catch (e) {
+      return interaction.editReply('❌ صار خطأ، حاول مرة ثانية');
     }
-    const serverQueue = queues.get(message.guild.id);
+
+    const serverQueue = queues.get(interaction.guild.id);
     if (!serverQueue) {
-      const queue = { textChannel: message.channel, voiceChannel, connection: null, player: null, songs: [] };
-      queues.set(message.guild.id, queue);
+      const queue = { textChannel: interaction.channel, voiceChannel, connection: null, player: null, songs: [] };
+      queues.set(interaction.guild.id, queue);
       queue.songs.push({ title, url });
-      const connection = joinVoiceChannel({ channelId: voiceChannel.id, guildId: message.guild.id, adapterCreator: message.guild.voiceAdapterCreator });
+      const connection = joinVoiceChannel({
+        channelId: voiceChannel.id,
+        guildId: interaction.guild.id,
+        adapterCreator: interaction.guild.voiceAdapterCreator,
+      });
       queue.connection = connection;
-      playSong(message.guild.id, queue.songs[0]);
+      playSong(interaction.guild.id, queue.songs[0]);
+      interaction.editReply(`▶️ يشغّل الحين: **${title}**`);
     } else {
       serverQueue.songs.push({ title, url });
-      return message.channel.send(`✅ **${title}** أضيفت للقائمة (#${serverQueue.songs.length})`);
+      interaction.editReply(`✅ **${title}** أضيفت للقائمة (#${serverQueue.songs.length})`);
     }
   }
 
-  if (command === 'skip' || command === 's') {
-    const queue = queues.get(message.guild.id);
-    if (!queue) return message.reply('❌ ما في موسيقى');
+  if (commandName === 'skip') {
+    const queue = queues.get(interaction.guild.id);
+    if (!queue) return interaction.reply({ content: '❌ ما في موسيقى', ephemeral: true });
     queue.player?.stop();
-    message.react('⏭️');
+    interaction.reply('⏭️ تم التخطي!');
   }
 
-  if (command === 'stop') {
-    const queue = queues.get(message.guild.id);
-    if (!queue) return message.reply('❌ ما في موسيقى');
+  if (commandName === 'stop') {
+    const queue = queues.get(interaction.guild.id);
+    if (!queue) return interaction.reply({ content: '❌ ما في موسيقى', ephemeral: true });
     queue.songs = [];
     queue.player?.stop();
     queue.connection?.destroy();
-    queues.delete(message.guild.id);
-    message.react('⏹️');
+    queues.delete(interaction.guild.id);
+    interaction.reply('⏹️ تم الإيقاف!');
   }
 
-  if (command === 'queue' || command === 'q') {
-    const queue = queues.get(message.guild.id);
-    if (!queue || !queue.songs.length) return message.reply('📭 القائمة فاضية');
+  if (commandName === 'queue') {
+    const queue = queues.get(interaction.guild.id);
+    if (!queue || !queue.songs.length) return interaction.reply({ content: '📭 القائمة فاضية', ephemeral: true });
     const list = queue.songs.map((s, i) => `${i === 0 ? '▶️' : `${i}.`} ${s.title}`).join('\n');
     const embed = new EmbedBuilder().setTitle('🎵 قائمة الأغاني').setDescription(list).setColor(0x5865F2);
-    message.channel.send({ embeds: [embed] });
+    interaction.reply({ embeds: [embed] });
   }
 
-  if (command === 'help') {
+  if (commandName === 'help') {
     const embed = new EmbedBuilder().setTitle('🎵 أوامر البوت').setColor(0x5865F2)
       .addFields(
-        { name: '`!play [اسم/رابط]`', value: 'تشغيل أغنية' },
-        { name: '`!skip`', value: 'تخطي الأغنية' },
-        { name: '`!stop`', value: 'إيقاف البوت' },
-        { name: '`!queue`', value: 'عرض القائمة' },
+        { name: '`/play [اسم/رابط]`', value: 'تشغيل أغنية' },
+        { name: '`/skip`', value: 'تخطي الأغنية' },
+        { name: '`/stop`', value: 'إيقاف البوت' },
+        { name: '`/queue`', value: 'عرض القائمة' },
       );
-    message.channel.send({ embeds: [embed] });
+    interaction.reply({ embeds: [embed] });
   }
 });
 
