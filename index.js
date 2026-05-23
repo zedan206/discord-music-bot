@@ -1,6 +1,6 @@
 const { Client, GatewayIntentBits, EmbedBuilder, REST, Routes, SlashCommandBuilder } = require('discord.js');
-const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, NoSubscriberBehavior, StreamType } = require('@discordjs/voice');
-const ytdl = require('@distube/ytdl-core');
+const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, NoSubscriberBehavior } = require('@discordjs/voice');
+const playdl = require('play-dl');
 const ytSearch = require('yt-search');
 
 const client = new Client({
@@ -16,9 +16,9 @@ const queues = new Map();
 
 const commands = [
   new SlashCommandBuilder().setName('play').setDescription('شغل أغنية').addStringOption(o => o.setName('اغنية').setDescription('اسم أو رابط').setRequired(true)),
-  new SlashCommandBuilder().setName('skip').setDescription('تخطي'),
-  new SlashCommandBuilder().setName('stop').setDescription('إيقاف'),
-  new SlashCommandBuilder().setName('queue').setDescription('القائمة'),
+  new SlashCommandBuilder().setName('skip').setDescription('تخطي الأغنية'),
+  new SlashCommandBuilder().setName('stop').setDescription('إيقاف البوت'),
+  new SlashCommandBuilder().setName('queue').setDescription('عرض القائمة'),
 ].map(c => c.toJSON());
 
 client.once('ready', async () => {
@@ -41,10 +41,11 @@ client.on('interactionCreate', async (interaction) => {
 
     try {
       let url, title;
-      if (ytdl.validateURL(query)) {
+      const validated = await playdl.validate(query);
+      if (validated === 'yt_video') {
         url = query;
-        const info = await ytdl.getInfo(query);
-        title = info.videoDetails.title;
+        const info = await playdl.video_info(query);
+        title = info.video_details.title;
       } else {
         const results = await ytSearch(query);
         if (!results.videos.length) return interaction.editReply('❌ ما لقيت نتائج');
@@ -134,20 +135,12 @@ client.on('interactionCreate', async (interaction) => {
 async function playSong(guildId) {
   const queue = queues.get(guildId);
   if (!queue || !queue.songs.length) return;
-
   const song = queue.songs[0];
   try {
-    const stream = ytdl(song.url, {
-      filter: 'audioonly',
-      quality: 'lowestaudio',
-      highWaterMark: 1 << 25,
-      dlChunkSize: 0,
+    const stream = await playdl.stream(song.url, { quality: 2 });
+    const resource = createAudioResource(stream.stream, {
+      inputType: stream.type,
     });
-
-    const resource = createAudioResource(stream, {
-      inputType: StreamType.Arbitrary,
-    });
-
     queue.player.play(resource);
     queue.textChannel.send(`▶️ يشغّل: **${song.title}**`);
   } catch (err) {
